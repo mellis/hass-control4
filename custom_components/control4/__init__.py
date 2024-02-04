@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
+import time
 
 from aiohttp import client_exceptions
 from pyControl4.account import C4Account
@@ -240,7 +242,7 @@ async def refresh_tokens(hass: HomeAssistant, entry: ConfigEntry):
     entry_data[CONF_CANCEL_TOKEN_REFRESH_CALLBACK] = async_call_later(
         hass=hass,
         delay=director_token_dict["validSeconds"],
-        action=obj.refresh_tokens,
+        action=obj.refresh,
     )
 
 
@@ -300,11 +302,22 @@ class RefreshTokensObject:
         """Initialize a RefreshTokensObject by storing the HomeAssistant and ConfigEntry objects required to run refresh_tokens()."""
         self.hass = hass
         self.entry = entry
+        self.attempts = 0
 
-    async def refresh_tokens(self, datetime):
+    async def refresh(self, datetime):
         """Call the refresh_tokens function to store updated authentication and director tokens in hass.data."""
         # unused datetime parameter is required, since Home Assistant will pass a datetime.datetime object as parameter when calling this function via async_call_later()
-        return await refresh_tokens(self.hass, self.entry)
+        while True:
+            try:
+                await refresh_tokens(self.hass, self.entry)
+            except Exception as exception:
+                # exponential backoff with jitter
+                delay = random.uniform(0, min(2**self.attempts, 15))
+                _LOGGER.warning("Token refresh failed, trying again in %s seconds", delay)
+                await asyncio.sleep(delay)
+                self.attempts += 1
+                continue
+            break
 
 
 class Control4Entity(Entity):
