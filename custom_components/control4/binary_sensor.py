@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant
 from . import Control4Entity, get_items_of_category
 from .const import CONF_DIRECTOR, CONF_DIRECTOR_ALL_ITEMS, CONTROL4_ENTITY_TYPE, DOMAIN
 from .director_utils import director_get_entry_variables
+from .security_zone import Control4SecurityZone, SecurityZoneCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -152,6 +153,23 @@ async def async_setup_entry(
             )
         )
 
+    # Panel zones need not appear as standalone items in the sensors category.
+    panels = await get_items_of_category(hass, entry, "security")
+    seen_panels = set()
+    for panel in panels:
+        if panel.get("type") != CONTROL4_ENTITY_TYPE or not panel.get("id"):
+            continue
+        if panel["id"] in seen_panels:
+            continue
+        seen_panels.add(panel["id"])
+        coordinator = SecurityZoneCoordinator(hass, entry, entry_data, panel)
+        await coordinator.async_refresh()
+        if not coordinator.last_update_success:
+            _LOGGER.warning("Could not discover zones for partition %s; reload the integration to retry", panel["id"])
+            continue
+        entity_list.extend(Control4SecurityZone(coordinator, key) for key in coordinator.data)
+        _LOGGER.info("Discovered %d zones for security partition %s", len(coordinator.data), panel["id"])
+
     async_add_entities(entity_list, True)
 
 
@@ -222,26 +240,26 @@ class Control4BinarySensor(Control4Entity, BinarySensorEntity):  # type: ignore[
             # Extra handling for alarm specific messages
             if "zone_state" in data:
                 self._extra_state_attributes["ContactState"] = bool(
-                    not data["zone_state"].pop("is_open")
+                    not data["zone_state"].get("is_open")
                 )
                 self._extra_state_attributes["LastActionTime"] = message["time"]
 
             if "contact_state" in data:
                 self._extra_state_attributes["ContactState"] = bool(
-                    data["contact_state"].pop("current_state") == "CLOSED"
+                    data["contact_state"].get("current_state") == "CLOSED"
                 )
                 self._extra_state_attributes["StateVerified"] = data[
                     "contact_state"
-                ].pop("is_verified")
+                ].get("is_verified")
                 self._extra_state_attributes["LastActionTime"] = message["time"]
                 await self._data_to_extra_state_attributes(data["contact_state"])
 
             if "relay_state" in data:
                 # For garage door sensors, use relay_state instead of contact_state
                 self._extra_state_attributes["ContactState"] = bool(
-                    data["relay_state"].pop("current_state") == "CLOSED"
+                    data["relay_state"].get("current_state") == "CLOSED"
                 )
-                self._extra_state_attributes["StateVerified"] = data["relay_state"].pop(
+                self._extra_state_attributes["StateVerified"] = data["relay_state"].get(
                     "is_verified"
                 )
                 self._extra_state_attributes["LastActionTime"] = message["time"]

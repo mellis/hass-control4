@@ -1,3 +1,5 @@
+> **Alarm zone testing preview:** see [TESTING.md](TESTING.md) for installation, validation, and rollback.
+
 # hass-control4
 
 This custom integration for Home Assistant allows control of Control4 lights, locks (only locks that are relay-based in Control4), alarm control panels, door/window/motion sensors (as binary sensors), thermostats, fans, relay devices (as switches), and blinds/shades (as covers, stateless open/close/stop).
