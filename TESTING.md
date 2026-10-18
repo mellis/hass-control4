@@ -1,4 +1,4 @@
-# Alarm zone preview: 1.7.1b1
+# Alarm zone preview: 1.7.1b2
 
 This preview adds passive binary sensors for zones belonging to security partitions,
 including zones absent from Control4's standalone sensor item list. It revives
@@ -13,15 +13,15 @@ by zone discovery and state tracking.
 - Requires Home Assistant 2026.10.2 for this tested preview.
 - Installs pyControl4 2.0.3.dev1 from mellis/pyControl4, pinned to commit
   `156f1ca82c7338db7ace8a876a4b613ace538f3c` in the manifest. No manual pip installation on HA is needed.
-- Local validation: library 61 tests; integration 17 tests against real Home Assistant
+- Local validation: library 61 tests; integration 19 tests against real Home Assistant
   2026.10.2 entity/coordinator APIs, with mocked Control4 responses.
-- Actual panel/driver behavior still needs live testing; the primary target is Partition 1.
+- Live discovery was verified on a DSC TL-280 driver with Partition 1. The preview skips the parent securitypanel proxy when partition proxies exist, and skips disabled partitions. Door/window transition checks remain the user test.
 
 ## Install for a first test (manual, keeps existing integration configuration)
 
 1. Copy the complete existing `/config/custom_components/control4` directory to
    `/config/control4-before-alarm-zones`. Keep the backup outside `custom_components`.
-2. Download `control4-1.7.1b1.zip` from this fork's 1.7.1b1 prerelease.
+2. Download `control4-1.7.1b2.zip` from this fork's 1.7.1b2 prerelease.
    Extract it: it contains `custom_components/control4/`. Replace the installed
    directory with that directory. The resulting manifest must be at
    `/config/custom_components/control4/manifest.json`.
@@ -32,7 +32,7 @@ by zone discovery and state tracking.
 
 This package is also a normal HACS integration source release. To have HACS manage
 the fork later, switch its repository from lawtancool/hass-control4 to
-mellis/hass-control4 as a custom Integration repository and select the 1.7.1b1
+mellis/hass-control4 as a custom Integration repository and select the 1.7.1b2
 prerelease (enable beta versions if hidden). Only one repository can own the
 `control4` directory. Keep the Home Assistant config entry when changing HACS repositories.
 The manual installation above avoids changing repository ownership for the first test.

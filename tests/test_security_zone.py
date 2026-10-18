@@ -241,3 +241,58 @@ async def test_metadata_only_poll_preserves_push_state_until_connection_failure(
     c.async_set_update_error(UpdateFailed("Disconnected"))
     await c.async_refresh()
     assert zone.is_on is None
+
+
+@pytest.mark.asyncio
+async def test_parent_panel_and_disabled_partitions_do_not_create_duplicates(env):
+    hass, entry, data, _ = env
+    panels = [
+        {
+            "id": 64,
+            "name": "Panel",
+            "type": 7,
+            "proxy": "securitypanel",
+            "parentId": 63,
+        },
+        {
+            "id": 65,
+            "name": "Partition 1",
+            "type": 7,
+            "proxy": "security",
+            "parentId": 63,
+        },
+        {
+            "id": 66,
+            "name": "Partition 2",
+            "type": 7,
+            "proxy": "security",
+            "parentId": 63,
+        },
+    ]
+    data[CONF_DIRECTOR].get_item_setup.side_effect = lambda item_id: {
+        "setup": {"enabled": item_id == 65}
+    }
+    add = MagicMock()
+    with patch(
+        "custom_components.control4.binary_sensor.get_items_of_category",
+        new=AsyncMock(side_effect=[[], panels]),
+    ):
+        await async_setup_entry(hass, entry, add)
+    assert len(add.call_args.args[0]) == 2
+    assert all(entity.panel_id == 65 for entity in add.call_args.args[0])
+    data[CONF_DIRECTOR].send_post_request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_panel_only_driver_keeps_metadata_fallback(env):
+    hass, entry, data, _ = env
+    panels = [
+        {"id": 64, "name": "Panel", "type": 7, "proxy": "securitypanel", "parentId": 63}
+    ]
+    add = MagicMock()
+    with patch(
+        "custom_components.control4.binary_sensor.get_items_of_category",
+        new=AsyncMock(side_effect=[[], panels]),
+    ):
+        await async_setup_entry(hass, entry, add)
+    assert len(add.call_args.args[0]) == 2

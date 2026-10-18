@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from . import Control4Entity, get_items_of_category
 from .const import CONF_DIRECTOR, CONF_DIRECTOR_ALL_ITEMS, CONTROL4_ENTITY_TYPE, DOMAIN
 from .director_utils import director_get_entry_variables
-from .security_zone import Control4SecurityZone, SecurityZoneCoordinator
+from .security_zone import Control4SecurityZone, SecurityZoneCoordinator, zone_bool
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -155,10 +155,23 @@ async def async_setup_entry(
 
     # Panel zones need not appear as standalone items in the sensors category.
     panels = await get_items_of_category(hass, entry, "security")
+    # A securitypanel proxy exposes all-zone metadata, while sibling security
+    # proxies expose the actual partitions. Prefer those to avoid duplicates.
+    partition_drivers = {
+        panel.get("parentId") for panel in panels
+        if panel.get("proxy") == "security" and panel.get("parentId") is not None
+    }
     seen_panels = set()
     for panel in panels:
         if panel.get("type") != CONTROL4_ENTITY_TYPE or not panel.get("id"):
             continue
+        if panel.get("proxy") == "securitypanel" and panel.get("parentId") in partition_drivers:
+            continue
+        setup = await director.get_item_setup(panel["id"])
+        if isinstance(setup, dict) and isinstance(setup.get("setup"), dict):
+            if zone_bool(setup["setup"].get("enabled")) is False:
+                _LOGGER.debug("Skipping disabled security partition %s", panel["id"])
+                continue
         if panel["id"] in seen_panels:
             continue
         seen_panels.add(panel["id"])
