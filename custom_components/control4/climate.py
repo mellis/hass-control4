@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import cached_property
 import logging
 
 
@@ -238,11 +237,13 @@ class Control4Climate(Control4Entity, ClimateEntity):  # type: ignore[misc]
     def fan_modes(self) -> list[str] | None:  # type: ignore[override]
         """Returns current fan modes supported."""
         fan_modes = self._extra_state_attributes.get(ATTR_FAN_MODES_LIST)
+        if fan_modes is None:
+            fan_modes = self._thermostat_setup.get("fan_modes", "")
         if fan_modes:
-            control4_fan_modes = fan_modes.split(",")
+            control4_fan_modes = [mode.strip() for mode in fan_modes.split(",")]
             # Only include mapped Home Assistant fan modes
             return [FAN_MODES[x] for x in control4_fan_modes if x in FAN_MODES]
-        return list(FAN_MODES.values())
+        return []
 
     @property
     def preset_modes(self) -> list[str] | None:  # type: ignore[override]
@@ -320,8 +321,18 @@ class Control4Climate(Control4Entity, ClimateEntity):  # type: ignore[misc]
         return None
 
     @property
+    def _has_single_setpoint(self) -> bool:
+        return self._thermostat_setup.get("has_single_setpoint") is True
+
+    @property
     def target_temperature(self) -> float | None:  # type: ignore[override]
         """Return the temperature currently set to be reached."""
+        if self._has_single_setpoint:
+            suffix = "F" if self.temperature_unit == UnitOfTemperature.FAHRENHEIT else "C"
+            return self._extra_state_attributes.get(
+                f"SETPOINT_SINGLE_{suffix}",
+                self._extra_state_attributes.get(f"SINGLE_SETPOINT_{suffix}"),
+            )
         if self.hvac_mode == HVACMode.HEAT:
             return self._get_heat_setpoint()
         if self.hvac_mode == HVACMode.COOL:
@@ -331,14 +342,14 @@ class Control4Climate(Control4Entity, ClimateEntity):  # type: ignore[misc]
     @property
     def target_temperature_high(self) -> float | None:  # type: ignore[override]
         """Return the upper bound target temperature."""
-        if self.hvac_mode != HVACMode.HEAT_COOL:
+        if self._has_single_setpoint or self.hvac_mode != HVACMode.HEAT_COOL:
             return None
         return self._get_cool_setpoint()
 
     @property
     def target_temperature_low(self) -> float | None:  # type: ignore[override]
         """Return the lower bound target temperature."""
-        if self.hvac_mode != HVACMode.HEAT_COOL:
+        if self._has_single_setpoint or self.hvac_mode != HVACMode.HEAT_COOL:
             return None
         return self._get_heat_setpoint()
 
@@ -363,8 +374,30 @@ class Control4Climate(Control4Entity, ClimateEntity):  # type: ignore[misc]
                     return res
         return PRECISION_WHOLE
 
+    def _single_setpoint_capability(self, name: str) -> float | None:
+        suffix = "f" if self.temperature_unit == UnitOfTemperature.FAHRENHEIT else "c"
+        return self._thermostat_setup.get(f"setpoint_single_{name}_{suffix}")
+
+    @property
+    def min_temp(self) -> float:
+        if self._has_single_setpoint:
+            value = self._single_setpoint_capability("min")
+            if value is not None:
+                return value
+        return super().min_temp
+
+    @property
+    def max_temp(self) -> float:
+        if self._has_single_setpoint:
+            value = self._single_setpoint_capability("max")
+            if value is not None:
+                return value
+        return super().max_temp
+
     @property
     def target_temperature_step(self) -> float:  # type: ignore[override]
+        if self._has_single_setpoint:
+            return self._single_setpoint_capability("resolution") or PRECISION_WHOLE
         if isinstance(self._thermostat_setup, dict):
             if self.temperature_unit == UnitOfTemperature.FAHRENHEIT:
                 res = self._thermostat_setup.get(
@@ -380,15 +413,14 @@ class Control4Climate(Control4Entity, ClimateEntity):  # type: ignore[misc]
                     return res
         return PRECISION_WHOLE
 
-    @cached_property
+    @property
     def supported_features(self) -> ClimateEntityFeature:
-        """Flag supported features."""
-        features = (
-            ClimateEntityFeature.TARGET_TEMPERATURE
-            | ClimateEntityFeature.FAN_MODE
-            | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
-            | ClimateEntityFeature.PRESET_MODE
-        )
+        """Expose controls supported by the thermostat."""
+        features = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        if not self._has_single_setpoint:
+            features |= ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+        if self.fan_modes:
+            features |= ClimateEntityFeature.FAN_MODE
         return features
 
     async def async_set_hvac_mode(self, hvac_mode) -> None:
@@ -420,7 +452,7 @@ class Control4Climate(Control4Entity, ClimateEntity):  # type: ignore[misc]
     async def async_set_fan_mode(self, fan_mode) -> None:
         """Set new target fan mode."""
         c4_climate = self.create_api_object()
-        if fan_mode in CONTROL4_FAN_MODES:
+        if fan_mode in (self.fan_modes or []) and fan_mode in CONTROL4_FAN_MODES:
             await c4_climate.set_fan_mode(CONTROL4_FAN_MODES[fan_mode])
         else:
             _LOGGER.exception(
@@ -469,7 +501,19 @@ class Control4Climate(Control4Entity, ClimateEntity):  # type: ignore[misc]
         low_temp = kwargs.get(ATTR_TARGET_TEMP_LOW)
         high_temp = kwargs.get(ATTR_TARGET_TEMP_HIGH)
         temp = kwargs.get(ATTR_TEMPERATURE)
-        if self.hvac_mode == HVACMode.HEAT_COOL:
+        if self._has_single_setpoint:
+            if temp is not None:
+                unit = (
+                    "FAHRENHEIT"
+                    if self.temperature_unit == UnitOfTemperature.FAHRENHEIT
+                    else "CELSIUS"
+                )
+                await self.entry_data[CONF_DIRECTOR].send_post_request(
+                    f"/api/v1/items/{self._idx}/commands",
+                    "SET_SETPOINT_SINGLE",
+                    {unit: temp},
+                )
+        elif self.hvac_mode == HVACMode.HEAT_COOL:
             if low_temp and high_temp:
                 if high_temp - low_temp < self._get_setpoint_deadband():
                     # Ensure there is a minimum gap from the new temp. Pick
