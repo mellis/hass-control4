@@ -296,3 +296,39 @@ async def test_panel_only_driver_keeps_metadata_fallback(env):
     ):
         await async_setup_entry(hass, entry, add)
     assert len(add.call_args.args[0]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("same_entry", "has_entities", "should_remove"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+)
+async def test_preview_device_cleanup_preserves_other_entries_and_attached_entities(
+    env, same_entry, has_entities, should_remove
+):
+    hass, entry, _, c = env
+    c.panel["parentId"] = 63
+    await c.async_refresh()
+    zone = Control4SecurityZone(c, "1")
+    zone.hass = hass
+    zone.entity_id = "binary_sensor.front_door"
+    zone.registry_entry = MagicMock(config_entry_id=entry.entry_id)
+    devices = MagicMock()
+    previous = MagicMock()
+    previous.config_entry_id = entry.entry_id if same_entry else "another-entry"
+    devices.async_get_device.return_value = previous
+    with (
+        patch(
+            "custom_components.control4.security_zone.dr.async_get",
+            return_value=devices,
+        ),
+        patch("custom_components.control4.security_zone.er.async_get"),
+        patch(
+            "custom_components.control4.security_zone.er.async_entries_for_device",
+            return_value=[object()] if has_entities else [],
+        ),
+        patch.object(zone, "async_write_ha_state"),
+    ):
+        await zone.async_added_to_hass()
+        assert devices.async_remove_device.called is should_remove
+        await zone.async_remove(force_remove=True)

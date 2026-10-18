@@ -10,6 +10,8 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -177,6 +179,23 @@ class Control4SecurityZone(CoordinatorEntity, BinarySensorEntity):
 
     async def async_added_to_hass(self):
         await super().async_added_to_hass()
+        # Migrate the short-lived partition-device preview after entities have
+        # attached to their existing hardware. Never remove a device with entities
+        # or a device belonging to another config entry.
+        if self.coordinator.panel.get("parentId") is not None and self.registry_entry:
+            devices = dr.async_get(self.hass)
+            controller = self.coordinator.entry_data[CONF_CONTROLLER_UNIQUE_ID]
+            previous = devices.async_get_device(
+                identifiers={(DOMAIN, f"{controller}_partition_{self.panel_id}")}
+            )
+            if (
+                previous is not None
+                and previous.config_entry_id == self.registry_entry.config_entry_id
+                and not er.async_entries_for_device(
+                    er.async_get(self.hass), previous.id
+                )
+            ):
+                devices.async_remove_device(previous.id)
         self.coordinator.entry_data[CONF_WEBSOCKET].add_item_callback(
             self.panel_id, self._zone_event
         )
