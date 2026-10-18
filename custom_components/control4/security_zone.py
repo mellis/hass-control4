@@ -10,6 +10,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
@@ -18,7 +19,7 @@ from homeassistant.helpers.update_coordinator import (
 from pyControl4.alarm import C4SecurityPanel
 from pyControl4.error_handling import C4Exception, Unauthorized
 
-from .const import CONF_CONTROLLER_UNIQUE_ID, CONF_DIRECTOR, CONF_WEBSOCKET
+from .const import CONF_CONTROLLER_UNIQUE_ID, CONF_DIRECTOR, CONF_WEBSOCKET, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 ZONE_CLASSES = {
@@ -139,8 +140,15 @@ class Control4SecurityZone(CoordinatorEntity, BinarySensorEntity):
         )
         type_id = zone_id(zone.get("type_id"))
         self._attr_device_class = ZONE_CLASSES.get(int(type_id)) if type_id else None
-        # Zone IDs are partition-scoped, not Control4 item/device IDs. Keep them
-        # independent of existing item sensors and their registry identities.
+        controller = coordinator.entry_data[CONF_CONTROLLER_UNIQUE_ID]
+        parent = coordinator.panel.get("parentId")
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"{controller}_partition_{self.panel_id}")},
+            name=coordinator.panel.get("name") or f"Partition {self.panel_id}",
+            manufacturer="Control4",
+            model="Security partition",
+            via_device=(DOMAIN, str(parent) if parent is not None else controller),
+        )
 
     @property
     def available(self):

@@ -1,4 +1,4 @@
-# Alarm zone preview: 1.7.1b2
+# Alarm zone preview: 1.7.1b3
 
 This preview adds passive binary sensors for zones belonging to security partitions,
 including zones absent from Control4's standalone sensor item list. It revives
@@ -21,7 +21,7 @@ by zone discovery and state tracking.
 
 1. Copy the complete existing `/config/custom_components/control4` directory to
    `/config/control4-before-alarm-zones`. Keep the backup outside `custom_components`.
-2. Download `control4-1.7.1b2.zip` from this fork's 1.7.1b2 prerelease.
+2. Download `control4-1.7.1b3.zip` from this fork's 1.7.1b3 prerelease.
    Extract it: it contains `custom_components/control4/`. Replace the installed
    directory with that directory. The resulting manifest must be at
    `/config/custom_components/control4/manifest.json`.
@@ -32,10 +32,14 @@ by zone discovery and state tracking.
 
 This package is also a normal HACS integration source release. To have HACS manage
 the fork later, switch its repository from lawtancool/hass-control4 to
-mellis/hass-control4 as a custom Integration repository and select the 1.7.1b2
+mellis/hass-control4 as a custom Integration repository and select the 1.7.1b3
 prerelease (enable beta versions if hidden). Only one repository can own the
 `control4` directory. Keep the Home Assistant config entry when changing HACS repositories.
 The manual installation above avoids changing repository ownership for the first test.
+
+Zone entities are grouped under a device named for their partition (for example,
+**Partition 1**), linked through the existing parent alarm device. Grouping preserves
+existing entity IDs and unique IDs.
 
 ## Test with Partition 1
 
