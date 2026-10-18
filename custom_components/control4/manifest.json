@@ -2,7 +2,7 @@
   "domain": "control4",
   "name": "Control4",
   "config_flow": true,
-  "documentation": "https://github.com/mellis/hass-control4/blob/alarm-zones/TESTING.md",
+  "documentation": "https://github.com/mellis/hass-control4",
   "requirements": [
     "pyControl4 @ https://github.com/mellis/pyControl4/archive/156f1ca82c7338db7ace8a876a4b613ace538f3c.zip"
   ],
@@ -16,6 +16,6 @@
   ],
   "integration_type": "hub",
   "iot_class": "local_push",
-  "version": "1.7.1b6",
+  "version": "1.7.1",
   "dependencies": []
 }
