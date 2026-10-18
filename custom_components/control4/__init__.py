@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import logging
 from functools import cached_property
 from typing import Any
@@ -300,7 +301,7 @@ class C4WebsocketConnectionTracker:
         item_callbacks = self.hass.data[DOMAIN][self.entry.entry_id][
             CONF_WEBSOCKET
         ].item_callbacks
-        for item_id, callback in item_callbacks.items():
+        for item_id, callbacks in list(item_callbacks.items()):
             item_attributes = await director_get_entry_variables(
                 self.hass, self.entry, item_id
             )
@@ -308,8 +309,10 @@ class C4WebsocketConnectionTracker:
                 "evtName": "OnDataToUI",
                 "iddevice": item_id,
                 "data": item_attributes,
+                "refresh": True,
             }
-            await callback(item_id, message)
+            for callback in list(callbacks):
+                await callback(item_id, deepcopy(message))
 
         self._was_disconnected = False
 
@@ -324,8 +327,9 @@ class C4WebsocketConnectionTracker:
         item_callbacks = self.hass.data[DOMAIN][self.entry.entry_id][
             CONF_WEBSOCKET
         ].item_callbacks
-        for item_id, callback in item_callbacks.items():
-            await callback(item_id, False)
+        for item_id, callbacks in list(item_callbacks.items()):
+            for callback in list(callbacks):
+                await callback(item_id, False)
 
 
 class RefreshTokensObject:

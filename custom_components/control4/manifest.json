@@ -2,17 +2,20 @@
   "domain": "control4",
   "name": "Control4",
   "config_flow": true,
-  "documentation": "https://github.com/lawtancool/hass-control4",
-  "requirements": ["pyControl4==2.0.2"],
+  "documentation": "https://github.com/mellis/hass-control4",
+  "requirements": [
+    "pyControl4 @ https://github.com/mellis/pyControl4/archive/156f1ca82c7338db7ace8a876a4b613ace538f3c.zip"
+  ],
   "ssdp": [
     {
       "st": "c4:director"
     }
   ],
-  "codeowners": ["@lawtancool"],
+  "codeowners": [
+    "@mellis"
+  ],
   "integration_type": "hub",
   "iot_class": "local_push",
-  "version": "1.7.0",
-  "issue_tracker": "https://github.com/lawtancool/hass-control4/issues",
+  "version": "1.7.1",
   "dependencies": []
 }

@@ -1,14 +1,16 @@
+> **mellis fork:** includes security-partition zone sensors, House Alarm device grouping, and Night mode reporting fixes. See [installation and rollback instructions](TESTING.md).
+
 # hass-control4
 
 This custom integration for Home Assistant allows control of Control4 lights, locks (only locks that are relay-based in Control4), alarm control panels, door/window/motion sensors (as binary sensors), thermostats, fans, relay devices (as switches), and blinds/shades (as covers, stateless open/close/stop).
 
 ## Installation
 
-First, add this repository as a [custom repository](https://www.hacs.xyz/docs/faq/custom_repositories/) in HACS. 
+First, add `https://github.com/mellis/hass-control4` as a [custom Integration repository](https://www.hacs.dev/docs/faq/custom_repositories/) in HACS.
 
 Then, you can use the link below to install the integration through HACS:
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=lawtancool&repository=hass-control4)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=mellis&repository=hass-control4)
 
 Once installed, follow the same setup instructions as the default integration: https://www.home-assistant.io/integrations/control4
 
@@ -20,7 +22,7 @@ In the dialog that appears, choose the Control4 alarm arming modes that you want
 
 ## Disclaimer
 
-This integration is essentially a newer version of the Control4 integration that is included in Home Assistant by default, and will receive new updates faster than the default integration.
+This fork extends lawtancool/hass-control4. It keeps the `control4` integration domain and existing entity identities.
 
 This means, however, that this custom integration may not be as stable as the default integration, as the code has not gone through Home Assistant's review process and contains the newest, bleeding-edge features.
 

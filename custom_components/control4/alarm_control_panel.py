@@ -280,16 +280,28 @@ class Control4AlarmControlPanel(Control4Entity, AlarmControlPanelEntity):  # typ
             return AlarmControlPanelState.DISARMED
         if partition_state == CONTROL4_ARMED_STATE:
             armed_type = self.extra_state_attributes.get(CONTROL4_ARMED_TYPE_VAR)
-            if armed_type == self.entry_data[CONF_ALARM_AWAY_MODE]:
-                return AlarmControlPanelState.ARMED_AWAY
-            if armed_type == self.entry_data[CONF_ALARM_HOME_MODE]:
-                return AlarmControlPanelState.ARMED_HOME
-            if armed_type == self.entry_data[CONF_ALARM_NIGHT_MODE]:
-                return AlarmControlPanelState.ARMED_NIGHT
-            if armed_type == self.entry_data[CONF_ALARM_CUSTOM_BYPASS_MODE]:
-                return AlarmControlPanelState.ARMED_CUSTOM_BYPASS
-            if armed_type == self.entry_data[CONF_ALARM_VACATION_MODE]:
-                return AlarmControlPanelState.ARMED_VACATION
+            if isinstance(armed_type, str):
+                reported_mode = armed_type.strip().casefold()
+                # Explicit user mappings take precedence over report aliases.
+                modes = (
+                    (CONF_ALARM_AWAY_MODE, AlarmControlPanelState.ARMED_AWAY),
+                    (CONF_ALARM_HOME_MODE, AlarmControlPanelState.ARMED_HOME),
+                    (CONF_ALARM_NIGHT_MODE, AlarmControlPanelState.ARMED_NIGHT),
+                    (CONF_ALARM_CUSTOM_BYPASS_MODE, AlarmControlPanelState.ARMED_CUSTOM_BYPASS),
+                    (CONF_ALARM_VACATION_MODE, AlarmControlPanelState.ARMED_VACATION),
+                )
+                for option, state in modes:
+                    configured_mode = self.entry_data.get(option)
+                    if (
+                        isinstance(configured_mode, str)
+                        and configured_mode != "(not set)"
+                        and reported_mode == configured_mode.strip().casefold()
+                    ):
+                        return state
+                # DSC drivers can accept "Instant Stay" but report "Night".
+                # Interpret the observed mode without changing the command sent.
+                if reported_mode == "night":
+                    return AlarmControlPanelState.ARMED_NIGHT
         alarm_state = self.extra_state_attributes.get(CONTROL4_ALARM_TYPE_VAR)
         if alarm_state:
             return AlarmControlPanelState.TRIGGERED
