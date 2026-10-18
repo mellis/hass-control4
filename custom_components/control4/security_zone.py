@@ -142,13 +142,19 @@ class Control4SecurityZone(CoordinatorEntity, BinarySensorEntity):
         self._attr_device_class = ZONE_CLASSES.get(int(type_id)) if type_id else None
         controller = coordinator.entry_data[CONF_CONTROLLER_UNIQUE_ID]
         parent = coordinator.panel.get("parentId")
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{controller}_partition_{self.panel_id}")},
-            name=coordinator.panel.get("name") or f"Partition {self.panel_id}",
-            manufacturer="Control4",
-            model="Security partition",
-            via_device=(DOMAIN, str(parent) if parent is not None else controller),
-        )
+        if parent is not None:
+            # Match Control4Entity's parent-device identifier, so zones join
+            # the same alarm hardware as the existing partition alarm entity.
+            # Omit metadata to preserve the device's vendor details and name.
+            self._attr_device_info = DeviceInfo(
+                identifiers={(DOMAIN, str(parent))},
+            )
+        else:
+            self._attr_device_info = DeviceInfo(
+                identifiers={(DOMAIN, f"{controller}_partition_{self.panel_id}")},
+                name=coordinator.panel.get("name") or f"Partition {self.panel_id}",
+                via_device=(DOMAIN, controller),
+            )
 
     @property
     def available(self):
