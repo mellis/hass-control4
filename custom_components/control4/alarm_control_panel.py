@@ -106,10 +106,17 @@ async def async_setup_entry(
                 item_manufacturer = None
                 item_device_name = None
                 item_model = None
+                item_code_arm_required = True
 
                 try:
                     item_setup_info = await director.get_item_setup(item_id)
-                    item_enabled = item_setup_info.get("setup", {}).get("enabled", True)
+                    item_setup = item_setup_info.get("setup", {})
+                    if not isinstance(item_setup, dict):
+                        item_setup = {}
+                    item_enabled = item_setup.get("enabled", True)
+                    code_required = item_setup.get("code_required_to_arm")
+                    if isinstance(code_required, bool):
+                        item_code_arm_required = code_required
                 except (KeyError, TypeError):
                     _LOGGER.debug(
                         "No setup info available for device %s, defaulting to enabled",
@@ -151,6 +158,7 @@ async def async_setup_entry(
                 item_attributes,
                 item_enabled,
                 item_emergency_types,
+                item_code_arm_required,
             )
         )
 
@@ -174,6 +182,7 @@ class Control4AlarmControlPanel(Control4Entity, AlarmControlPanelEntity):  # typ
         device_attributes: dict,
         is_enabled: bool,
         emergency_types: list[str],
+        code_arm_required: bool = True,
     ) -> None:
         """Initialize Control4 alarm control panel entity."""
         super().__init__(
@@ -190,6 +199,7 @@ class Control4AlarmControlPanel(Control4Entity, AlarmControlPanelEntity):  # typ
         )
         self._is_enabled = is_enabled
         self._emergency_types = emergency_types
+        self._attr_code_arm_required = code_arm_required
         self._extra_state_attributes["zone_state"] = {}
 
     async def _update_callback(self, device, message):
@@ -243,6 +253,14 @@ class Control4AlarmControlPanel(Control4Entity, AlarmControlPanelEntity):  # typ
     def code_format(self):
         """Regex for code format or None if no code is required."""
         return CodeFormat.NUMBER
+
+    @property
+    def code_arm_required(self) -> bool:
+        """Use the partition's current requirement, falling back to its setup."""
+        code_required = self._extra_state_attributes.get("CODE_REQUIRED_TO_ARM")
+        if isinstance(code_required, bool):
+            return code_required
+        return self._attr_code_arm_required
 
     @cached_property
     def supported_features(self) -> AlarmControlPanelEntityFeature:
