@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 import logging
+import math
 from functools import cached_property
 from typing import Any
 import random
@@ -12,7 +13,7 @@ import random
 from aiohttp import client_exceptions
 from pyControl4.account import C4Account
 from pyControl4.director import C4Director
-from pyControl4.error_handling import BadCredentials, InvalidCategory
+from pyControl4.error_handling import BadCredentials, C4Exception, InvalidCategory
 from pyControl4.websocket import C4Websocket
 
 from homeassistant.config_entries import ConfigEntry
@@ -214,16 +215,38 @@ async def refresh_tokens(hass: HomeAssistant, entry: ConfigEntry):
     )
     try:
         await account.get_account_bearer_token()
-    except (client_exceptions.ClientError, asyncio.TimeoutError) as exception:
-        raise ConfigEntryNotReady(exception) from exception
     except BadCredentials as exception:
         raise ConfigEntryAuthFailed(exception) from exception
+    except (
+        client_exceptions.ClientError,
+        asyncio.TimeoutError,
+        C4Exception,
+        ValueError,
+        KeyError,
+    ) as exception:
+        raise ConfigEntryNotReady(
+            f"Account token request failed ({type(exception).__name__})"
+        ) from exception
 
     controller_unique_id = config[CONF_CONTROLLER_UNIQUE_ID]
     try:
-        director_token_dict = await account.get_director_bearer_token(controller_unique_id)
-    except (client_exceptions.ClientError, asyncio.TimeoutError) as exception:
-        raise ConfigEntryNotReady(exception) from exception
+        director_token_dict = await account.get_director_bearer_token(
+            controller_unique_id
+        )
+        valid_seconds = float(director_token_dict["validSeconds"])
+        if not math.isfinite(valid_seconds) or valid_seconds <= 0:
+            raise ValueError("Invalid director token lifetime")
+    except (
+        client_exceptions.ClientError,
+        asyncio.TimeoutError,
+        C4Exception,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as exception:
+        raise ConfigEntryNotReady(
+            f"Director token request failed ({type(exception).__name__})"
+        ) from exception
     no_verify_ssl_session = aiohttp_client.async_get_clientsession(
         hass, verify_ssl=False
     )
@@ -232,8 +255,26 @@ async def refresh_tokens(hass: HomeAssistant, entry: ConfigEntry):
         config[CONF_HOST], director_token_dict[CONF_TOKEN], no_verify_ssl_session
     )
 
-    _LOGGER.debug("Saving new account and director tokens in hass data")
+    # The cloud may issue a token the controller does not accept. Check a
+    # read-only endpoint before replacing the working REST client.
+    try:
+        await director.get_all_item_info()
+    except (
+        client_exceptions.ClientError,
+        asyncio.TimeoutError,
+        C4Exception,
+        ValueError,
+        KeyError,
+    ) as exception:
+        raise ConfigEntryNotReady(
+            f"Director token validation failed ({type(exception).__name__})"
+        ) from exception
+
     entry_data = hass.data[DOMAIN][entry.entry_id]
+    previous_account = entry_data.get(CONF_ACCOUNT)
+    previous_director = entry_data.get(CONF_DIRECTOR)
+    # Reconnection callbacks read this shared client to restore entity states.
+    # Roll it back if authenticated subscription setup does not complete.
     entry_data[CONF_ACCOUNT] = account
     entry_data[CONF_DIRECTOR] = director
 
@@ -259,20 +300,27 @@ async def refresh_tokens(hass: HomeAssistant, entry: ConfigEntry):
     _LOGGER.debug("Starting new WebSocket connection")
     try:
         await entry_data[CONF_WEBSOCKET].sio_connect(director.director_bearer_token)
+    except asyncio.CancelledError:
+        entry_data[CONF_ACCOUNT] = previous_account
+        entry_data[CONF_DIRECTOR] = previous_director
+        raise
     except Exception as exception:
-        raise ConfigEntryNotReady(exception) from exception
+        entry_data[CONF_ACCOUNT] = previous_account
+        entry_data[CONF_DIRECTOR] = previous_director
+        raise ConfigEntryNotReady(
+            f"Authenticated subscription failed ({type(exception).__name__})"
+        ) from exception
 
-    # Schedule refresh 5mins before expiry, but no sooner than 5mins from now
-    delay = max(
-        director_token_dict["validSeconds"] - SCHEDULE_REFRESH_ADVANCE_SEC,
-        SCHEDULE_REFRESH_ADVANCE_SEC,
-    )
+    # Refresh before expiry even if Control4 issues a short-lived token.
+    delay = max(1, valid_seconds - min(SCHEDULE_REFRESH_ADVANCE_SEC, valid_seconds / 2))
 
     _LOGGER.debug(
         "Registering next token refresh in %s seconds",
         delay,
     )
     obj = RefreshTokensObject(hass, entry)
+    if cancel_refresh := entry_data.get(CONF_CANCEL_TOKEN_REFRESH_CALLBACK):
+        cancel_refresh()
     entry_data[CONF_CANCEL_TOKEN_REFRESH_CALLBACK] = async_call_later(
         hass=hass,
         delay=delay,
@@ -349,14 +397,20 @@ class RefreshTokensObject:
     async def _refresh_token_with_retry(self):
         try:
             await refresh_tokens(self.hass, self.entry)
-        except ConfigEntryNotReady:
-            self._schedule_refresh_retry()
+        except ConfigEntryNotReady as exception:
+            self._schedule_refresh_retry(exception)
+        except ConfigEntryAuthFailed:
+            # Scheduled callbacks do not get config-entry setup's automatic
+            # authentication handling. Ask HA to start its normal reauth flow.
+            self.entry.async_start_reauth(self.hass)
 
-    def _schedule_refresh_retry(self):
+    def _schedule_refresh_retry(self, exception):
         self.retries += 1
         # exponential backoff with jitter
-        delay = random.uniform(0, min(2**self.retries, RETRY_BACKOFF_MAX_SEC))
-        _LOGGER.warning("Token refresh failed, trying again in %s seconds", delay)
+        delay = random.uniform(1, min(2 ** min(self.retries, 5), RETRY_BACKOFF_MAX_SEC))
+        _LOGGER.warning(
+            "Token refresh failed: %s; trying again in %.1f seconds", exception, delay
+        )
         entry_data = self.hass.data[DOMAIN][self.entry.entry_id]
         entry_data[CONF_CANCEL_TOKEN_REFRESH_CALLBACK] = async_call_later(
             hass=self.hass,
