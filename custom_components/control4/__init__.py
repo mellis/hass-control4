@@ -6,6 +6,7 @@ import asyncio
 from copy import deepcopy
 import logging
 import math
+import time
 from functools import cached_property
 from typing import Any
 import random
@@ -26,7 +27,11 @@ from homeassistant.const import (
     CONF_SCAN_INTERVAL,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
 from homeassistant.helpers import aiohttp_client, device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
@@ -64,6 +69,7 @@ from .const import (
     SCHEDULE_REFRESH_ADVANCE_SEC,
 )
 from .director_utils import director_get_entry_variables
+from .token_cache import DirectorTokenCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -80,30 +86,58 @@ PLATFORMS = [
     Platform.COVER,
 ]
 
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Control4 from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     entry_data = hass.data[DOMAIN].setdefault(entry.entry_id, {})
     config = entry.data
 
-    await refresh_tokens(hass, entry)
+    cache = entry_data["token_cache"] = DirectorTokenCache(hass, entry)
+    cached = await cache.async_load()
+    if cached is not None:
+        try:
+            await refresh_tokens(hass, entry, cached=cached)
+        except ConfigEntryNotReady:
+            # A cache is only a candidate: the local controller is authoritative.
+            _LOGGER.info(
+                "Saved Director token could not be validated; trying cloud authentication"
+            )
+            await refresh_tokens(hass, entry)
+    else:
+        await refresh_tokens(hass, entry)
     # Copy controller unique id from config to entry_data for use by entities
     entry_data[CONF_CONTROLLER_UNIQUE_ID] = config[CONF_CONTROLLER_UNIQUE_ID]
 
-    # Add Control4 controller to device registry
-    try:
-        controller_href = (await entry_data[CONF_ACCOUNT].get_account_controllers())[
-            "href"
-        ]
-    except (client_exceptions.ClientError, asyncio.TimeoutError) as exception:
-        raise ConfigEntryNotReady(exception) from exception
-
-    try:
-        entry_data[CONF_DIRECTOR_SW_VERSION] = await entry_data[
-            CONF_ACCOUNT
-        ].get_controller_os_version(controller_href)
-    except (client_exceptions.ClientError, asyncio.TimeoutError) as exception:
-        raise ConfigEntryNotReady(exception) from exception
+    # Cloud metadata is optional: it must never prevent local startup.
+    if cache.data:
+        entry_data[CONF_DIRECTOR_SW_VERSION] = cache.data.get("sw_version")
+    if entry_data.get(CONF_ACCOUNT) is not None:
+        try:
+            controller_href = (
+                await entry_data[CONF_ACCOUNT].get_account_controllers()
+            )["href"]
+            entry_data[CONF_DIRECTOR_SW_VERSION] = await entry_data[
+                CONF_ACCOUNT
+            ].get_controller_os_version(controller_href)
+            if cache.data:
+                await cache.async_save(
+                    cache.data[CONF_TOKEN],
+                    cache.data["expires_at"],
+                    entry_data[CONF_DIRECTOR_SW_VERSION],
+                )
+        except (
+            client_exceptions.ClientError,
+            asyncio.TimeoutError,
+            C4Exception,
+            ValueError,
+            KeyError,
+            HomeAssistantError,
+            OSError,
+        ):
+            _LOGGER.warning(
+                "Controller cloud metadata unavailable; continuing local setup"
+            )
 
     _, model, mac_address = entry_data[CONF_CONTROLLER_UNIQUE_ID].split("_", 3)
     entry_data[CONF_DIRECTOR_MODEL] = model.upper()
@@ -116,7 +150,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         manufacturer="Control4",
         name=entry_data[CONF_CONTROLLER_UNIQUE_ID],
         model=entry_data[CONF_DIRECTOR_MODEL],
-        sw_version=entry_data[CONF_DIRECTOR_SW_VERSION],
+        sw_version=entry_data.get(CONF_DIRECTOR_SW_VERSION),
     )
 
     # Store all items found on controller for platforms to use
@@ -126,7 +160,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise ConfigEntryNotReady(exception) from exception
     entry_data[CONF_DIRECTOR_ALL_ITEMS] = director_all_items
 
-    entry_data[CONF_UI_CONFIGURATION] = await entry_data[CONF_DIRECTOR].get_ui_configuration()
+    entry_data[CONF_UI_CONFIGURATION] = await entry_data[
+        CONF_DIRECTOR
+    ].get_ui_configuration()
 
     # Load options from config entry
     entry_data[CONF_SCAN_INTERVAL] = entry.options.get(
@@ -182,6 +218,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove the private token cache with its integration entry."""
+    await DirectorTokenCache(hass, entry).async_remove()
+
+
 async def update_listener(hass, config_entry):
     """Update when config_entry options update."""
     _LOGGER.debug("Config entry was updated, rerunning setup")
@@ -205,48 +246,58 @@ async def get_items_of_category(hass: HomeAssistant, entry: ConfigEntry, categor
         return []
 
 
-async def refresh_tokens(hass: HomeAssistant, entry: ConfigEntry):
+async def refresh_tokens(hass: HomeAssistant, entry: ConfigEntry, *, cached=None):
     """Store updated authentication and director tokens in hass.data, and schedule next token refresh."""
     config = entry.data
-    verify_ssl_session = aiohttp_client.async_get_clientsession(hass)
+    if cached is not None:
+        account = None
+        director_token_dict = {CONF_TOKEN: cached[CONF_TOKEN]}
+        expires_at = cached["expires_at"]
+        valid_seconds = expires_at - time.time()
+        if valid_seconds <= 0:
+            raise ConfigEntryNotReady("Saved Director token has expired")
+    else:
+        verify_ssl_session = aiohttp_client.async_get_clientsession(hass)
 
-    account = C4Account(
-        config[CONF_USERNAME], config[CONF_PASSWORD], verify_ssl_session
-    )
-    try:
-        await account.get_account_bearer_token()
-    except BadCredentials as exception:
-        raise ConfigEntryAuthFailed(exception) from exception
-    except (
-        client_exceptions.ClientError,
-        asyncio.TimeoutError,
-        C4Exception,
-        ValueError,
-        KeyError,
-    ) as exception:
-        raise ConfigEntryNotReady(
-            f"Account token request failed ({type(exception).__name__})"
-        ) from exception
-
-    controller_unique_id = config[CONF_CONTROLLER_UNIQUE_ID]
-    try:
-        director_token_dict = await account.get_director_bearer_token(
-            controller_unique_id
+        account = C4Account(
+            config[CONF_USERNAME], config[CONF_PASSWORD], verify_ssl_session
         )
-        valid_seconds = float(director_token_dict["validSeconds"])
-        if not math.isfinite(valid_seconds) or valid_seconds <= 0:
-            raise ValueError("Invalid director token lifetime")
-    except (
-        client_exceptions.ClientError,
-        asyncio.TimeoutError,
-        C4Exception,
-        ValueError,
-        KeyError,
-        TypeError,
-    ) as exception:
-        raise ConfigEntryNotReady(
-            f"Director token request failed ({type(exception).__name__})"
-        ) from exception
+        try:
+            await account.get_account_bearer_token()
+        except BadCredentials as exception:
+            raise ConfigEntryAuthFailed(exception) from exception
+        except (
+            client_exceptions.ClientError,
+            asyncio.TimeoutError,
+            C4Exception,
+            ValueError,
+            KeyError,
+        ) as exception:
+            raise ConfigEntryNotReady(
+                f"Account token request failed ({type(exception).__name__})"
+            ) from exception
+
+        controller_unique_id = config[CONF_CONTROLLER_UNIQUE_ID]
+        requested_at = time.time()
+        try:
+            director_token_dict = await account.get_director_bearer_token(
+                controller_unique_id
+            )
+            valid_seconds = float(director_token_dict["validSeconds"])
+            if not math.isfinite(valid_seconds) or valid_seconds <= 0:
+                raise ValueError("Invalid director token lifetime")
+        except (
+            client_exceptions.ClientError,
+            asyncio.TimeoutError,
+            C4Exception,
+            ValueError,
+            KeyError,
+            TypeError,
+        ) as exception:
+            raise ConfigEntryNotReady(
+                f"Director token request failed ({type(exception).__name__})"
+            ) from exception
+        expires_at = requested_at + valid_seconds
     no_verify_ssl_session = aiohttp_client.async_get_clientsession(
         hass, verify_ssl=False
     )
@@ -297,6 +348,11 @@ async def refresh_tokens(hass: HomeAssistant, entry: ConfigEntry):
         logging.getLogger("engineio.client").setLevel(logging.WARNING)
         logging.getLogger("charset_normalizer").setLevel(logging.ERROR)
 
+    if expires_at <= time.time():
+        entry_data[CONF_ACCOUNT] = previous_account
+        entry_data[CONF_DIRECTOR] = previous_director
+        raise ConfigEntryNotReady("Director token expired during local validation")
+
     _LOGGER.debug("Starting new WebSocket connection")
     try:
         await entry_data[CONF_WEBSOCKET].sio_connect(director.director_bearer_token)
@@ -307,12 +363,40 @@ async def refresh_tokens(hass: HomeAssistant, entry: ConfigEntry):
     except Exception as exception:
         entry_data[CONF_ACCOUNT] = previous_account
         entry_data[CONF_DIRECTOR] = previous_director
+        # sio_connect disconnects the old subscription before authenticating.
+        # Restore it as well as the REST client if the candidate is rejected.
+        if previous_director is not None and hasattr(
+            previous_director, "director_bearer_token"
+        ):
+            try:
+                await entry_data[CONF_WEBSOCKET].sio_connect(
+                    previous_director.director_bearer_token
+                )
+            except Exception:
+                _LOGGER.warning("Could not restore previous Director subscription")
         raise ConfigEntryNotReady(
             f"Authenticated subscription failed ({type(exception).__name__})"
         ) from exception
 
+    # Only a token accepted by both local APIs may replace the saved credential.
+    if cached is None and (cache := entry_data.get("token_cache")) is not None:
+        try:
+            await cache.async_save(
+                director_token_dict[CONF_TOKEN],
+                expires_at,
+                entry_data.get(CONF_DIRECTOR_SW_VERSION),
+            )
+        except (HomeAssistantError, OSError):
+            _LOGGER.warning(
+                "Could not persist Director token; local connection remains active"
+            )
+
     # Refresh before expiry even if Control4 issues a short-lived token.
-    delay = max(1, valid_seconds - min(SCHEDULE_REFRESH_ADVANCE_SEC, valid_seconds / 2))
+    remaining = expires_at - time.time()
+    delay = max(1, remaining - min(SCHEDULE_REFRESH_ADVANCE_SEC, remaining / 2))
+    if cached is not None:
+        # Refresh in the background; a cloud outage must not delay local setup.
+        delay = 1
 
     _LOGGER.debug(
         "Registering next token refresh in %s seconds",
@@ -479,13 +563,17 @@ class Control4Entity(Entity):
         try:
             _LOGGER.debug("Deregistering callback for item id %s", self._idx)
             # Pass specific callback for selective removal
-            self.entry_data[CONF_WEBSOCKET].remove_item_callback(self._idx, self._update_callback)
+            self.entry_data[CONF_WEBSOCKET].remove_item_callback(
+                self._idx, self._update_callback
+            )
             _LOGGER.debug(
                 "Deregistering callback for parent device %s of item id %s",
                 self._device_id,
                 self._idx,
             )
-            self.entry_data[CONF_WEBSOCKET].remove_item_callback(self._device_id, self._update_callback)
+            self.entry_data[CONF_WEBSOCKET].remove_item_callback(
+                self._device_id, self._update_callback
+            )
         except KeyError:
             return
 
