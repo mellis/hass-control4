@@ -52,7 +52,9 @@ def env():
         "custom_components.control4.aiohttp_client.async_get_clientsession"
     ), patch(
         "custom_components.control4.async_call_later"
-    ) as schedule:
+    ) as schedule, patch(
+        "custom_components.control4.time.time", return_value=1000
+    ):
         yield SimpleNamespace(**locals())
 
 
@@ -148,3 +150,150 @@ async def test_retries_remain_bounded_after_long_outage(env):
     refresher.retries = 10000
     await refresher.refresh_tokens(None)
     assert 1 <= env.schedule.call_args.kwargs["delay"] <= 30
+
+
+@pytest.mark.asyncio
+async def test_saved_token_authenticates_locally_without_cloud(env):
+    env.account.get_account_bearer_token.side_effect = TimeoutError
+    await refresh_tokens(
+        env.hass, env.entry, cached={"token": "saved", "expires_at": 2000}
+    )
+    env.account.get_account_bearer_token.assert_not_awaited()
+    env.account.get_director_bearer_token.assert_not_awaited()
+    env.director.get_all_item_info.assert_awaited_once()
+    env.websocket.sio_connect.assert_awaited_once()
+    assert env.schedule.call_args.kwargs["delay"] == 1
+
+
+@pytest.mark.asyncio
+async def test_saved_token_does_not_extend_expiry(env):
+    cache = env.data["token_cache"] = SimpleNamespace(async_save=AsyncMock())
+    await refresh_tokens(
+        env.hass, env.entry, cached={"token": "saved", "expires_at": 2000}
+    )
+    cache.async_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_expired_saved_token_is_not_sent(env):
+    with pytest.raises(ConfigEntryNotReady, match="expired"):
+        await refresh_tokens(
+            env.hass, env.entry, cached={"token": "saved", "expires_at": 999}
+        )
+    env.director.get_all_item_info.assert_not_awaited()
+    env.websocket.sio_connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["rest", "subscription", "cloud"])
+async def test_rejected_candidate_never_overwrites_saved_token(env, failure):
+    cache = env.data["token_cache"] = SimpleNamespace(async_save=AsyncMock())
+    if failure == "rest":
+        env.director.get_all_item_info.side_effect = Unauthorized("secret-token")
+    elif failure == "subscription":
+        env.websocket.sio_connect.side_effect = Unauthorized("secret-token")
+    else:
+        env.account.get_account_bearer_token.side_effect = TimeoutError
+    with pytest.raises(ConfigEntryNotReady):
+        await refresh_tokens(env.hass, env.entry)
+    cache.async_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_validated_token_persisted_with_absolute_expiry(env):
+    async def save(*args):
+        env.director.get_all_item_info.assert_awaited_once()
+        env.websocket.sio_connect.assert_awaited_once()
+
+    cache = env.data["token_cache"] = SimpleNamespace(
+        async_save=AsyncMock(side_effect=save)
+    )
+    await refresh_tokens(env.hass, env.entry)
+    cache.async_save.assert_awaited_once_with("new", 87400, None)
+
+
+@pytest.mark.asyncio
+async def test_disk_failure_does_not_break_local_control_or_leak_token(env, caplog):
+    env.data["token_cache"] = SimpleNamespace(
+        async_save=AsyncMock(side_effect=OSError("secret-token"))
+    )
+    await refresh_tokens(env.hass, env.entry)
+    assert env.data[CONF_DIRECTOR] is env.director
+    assert env.schedule.called
+    assert "Could not persist" in caplog.text
+    assert "secret-token" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saved_state", ["valid", "rejected", "expired", "missing"])
+async def test_full_setup_local_restart_and_cloud_fallback(env, saved_state):
+    from custom_components.control4 import async_setup_entry
+
+    env.entry.data[CONF_CONTROLLER_UNIQUE_ID] = "control4_ca1_000fff51a1e2"
+    env.entry.options = {}
+    env.hass.config_entries = SimpleNamespace(async_forward_entry_setups=AsyncMock())
+    env.director.get_ui_configuration = AsyncMock(return_value={})
+    env.account.get_account_controllers = AsyncMock(side_effect=TimeoutError)
+    cached = {"token": "saved", "expires_at": 2000, "sw_version": "3.4"}
+    cache = MagicMock()
+    cache.async_load = AsyncMock(
+        return_value=cached if saved_state in ("valid", "rejected") else None
+    )
+    cache.async_save = AsyncMock()
+    cache.data = cached if saved_state in ("valid", "rejected") else None
+    if saved_state == "valid":
+        env.account.get_account_bearer_token.side_effect = TimeoutError
+    if saved_state == "rejected":
+        env.director.get_all_item_info.side_effect = [Unauthorized("rejected"), [], []]
+    with patch(
+        "custom_components.control4.DirectorTokenCache", return_value=cache
+    ), patch("custom_components.control4.dr.async_get") as registry:
+        assert await async_setup_entry(env.hass, env.entry)
+    env.hass.config_entries.async_forward_entry_setups.assert_awaited_once()
+    if saved_state == "valid":
+        env.account.get_account_bearer_token.assert_not_awaited()
+        env.account.get_account_controllers.assert_not_awaited()
+        assert (
+            registry.return_value.async_get_or_create.call_args.kwargs["sw_version"]
+            == "3.4"
+        )
+    else:
+        env.account.get_account_bearer_token.assert_awaited_once()
+        env.account.get_account_controllers.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cached_connection_survives_failed_background_refresh(env):
+    await refresh_tokens(
+        env.hass, env.entry, cached={"token": "saved", "expires_at": 2000}
+    )
+    env.account.get_account_bearer_token.side_effect = TimeoutError
+    background_refresh = env.schedule.call_args.kwargs["action"]
+    await background_refresh(None)
+    assert env.data[CONF_DIRECTOR] is env.director
+    assert env.websocket.sio_connect.await_count == 1
+    assert env.schedule.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_subscription_failure_reconnects_previous_token(env):
+    previous = SimpleNamespace(director_bearer_token="previous-token")
+    env.data[CONF_DIRECTOR] = previous
+    env.websocket.sio_connect.side_effect = [Unauthorized("rejected"), None]
+    await RefreshTokensObject(env.hass, env.entry).refresh_tokens(None)
+    assert env.data[CONF_DIRECTOR] is previous
+    assert env.websocket.sio_connect.await_args_list[-1].args == ("previous-token",)
+    assert env.schedule.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_token_expiring_during_validation_is_not_connected_or_saved(env):
+    env.data["token_cache"] = SimpleNamespace(async_save=AsyncMock())
+    with patch("custom_components.control4.time.time", side_effect=[1000, 2001]):
+        with pytest.raises(ConfigEntryNotReady, match="expired during"):
+            await refresh_tokens(
+                env.hass, env.entry, cached={"token": "saved", "expires_at": 2000}
+            )
+    env.websocket.sio_connect.assert_not_awaited()
+    env.data["token_cache"].async_save.assert_not_awaited()
+    assert env.data[CONF_DIRECTOR] is env.old_director
